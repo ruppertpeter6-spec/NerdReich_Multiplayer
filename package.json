@@ -1,5 +1,5 @@
 {
-  "name": "nerd-reich-metropolis",
+  "name": "nerd-reich-metropolis","version": "1.1",
   "scripts": {
     "postinstall": "npm install --prefix NerdReich_Multiplayer",
     "start": "node NerdReich_Multiplayer/server.js"
