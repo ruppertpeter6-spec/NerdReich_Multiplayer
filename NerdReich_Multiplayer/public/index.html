@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NERD REICH: METROPOLIS</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; display:flex; align-items:center; justify-content:center; min-height:100vh; overflow:hidden; }
+canvas { display:block; }
+#sfxBtn {
+  position:fixed; top:12px; right:16px;
+  background:none; border:1px solid #334466; color:#667799;
+  font:12px monospace; padding:4px 10px; cursor:pointer; z-index:10;
+  letter-spacing:1px;
+}
+#sfxBtn:hover { border-color:#00d4ff; color:#00d4ff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="sfxBtn">♪ SFX ON</button>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const W=1280, H=720;
+const c=document.getElementById('c');
+c.width=W; c.height=H;
+const ctx=c.getContext('2d');
+
+function resize(){
+  const sc=Math.min(window.innerWidth/W, window.innerHeight/H);
+  c.style.width=W*sc+'px'; c.style.height=H*sc+'px';
+}
+resize(); window.addEventListener('resize', resize);
+
+// ── AUDIO (SFX only, no background music) ────────────────────
+let audioCtx=null, sounds={}, sfxOn=false, sfxReady=false;
+
+async function initAudio(){
+  if(sfxReady) return;
+  try{
+    audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    sfxReady=true;
+    sfxOn=true;
+    document.getElementById('sfxBtn').textContent='♪ SFX ON';
+    await loadSounds();
+  }catch(e){ console.warn('Audio unavailable',e); }
+}
+
+async function loadSounds(){
+  for(const name of ['capture','steal','delivery','death','win']){
+    try{
+      const r=await fetch(`/snd_${name}.mp3`);
+      const buf=await r.arrayBuffer();
+      sounds[name]=await audioCtx.decodeAudioData(buf);
+    }catch(e){ console.warn('Could not load sound:',name); }
+  }
+}
+
+function playSound(name, vol=1){
+  if(!sfxOn||!audioCtx||!sounds[name]) return;
+  const src=audioCtx.createBufferSource();
+  const gain=audioCtx.createGain();
+  gain.gain.value=vol;
+  src.buffer=sounds[name];
+  src.connect(gain); gain.connect(audioCtx.destination);
+  src.start();
+}
+
+document.getElementById('sfxBtn').addEventListener('click',()=>{
+  if(!sfxReady){ initAudio(); return; }
+  sfxOn=!sfxOn;
+  document.getElementById('sfxBtn').textContent=sfxOn?'♪ SFX ON':'♪ SFX OFF';
+});
+
+// ── PALETTE ──────────────────────────────────────────────────
+const C={bg:'#06060e',worker:'#8899bb',gear1:'#ff2255',gear2:'#ff8800',gold:'#ffcc00',purple:'#cc44ff',red:'#ff2244'};
+
+// ── SOCKET ───────────────────────────────────────────────────
+const socket=io();
+let myId=null, myColor=null;
+let status='connecting';
+let queuePos=0, queueTotal=0;
+let gs={ players:[], workers:[], gears:[], queueLen:0, tick:0 };
+let prevGs={ players:[], workers:[], gears:[], queueLen:0, tick:0 };
+let winFlash=null, deathAlpha=0;
+let localTick=0;
+
+// ── SOUND EVENT DETECTION (from state diffs) ─────────────────
+function checkSoundEvents(prev, curr){
+  if(!myId || status!=='playing') return;
+
+  // delivery: my score went up
+  const pMe=prev.players.find(p=>p.id===myId);
+  const cMe=curr.players.find(p=>p.id===myId);
+  if(pMe && cMe && cMe.score > pMe.score) playSound('delivery', 0.9);
+
+  // build previous owner map
+  const prevOwners={};
+  prev.workers.forEach(w=>{ prevOwners[w.id]=w.owned; });
+
+  // capture vs steal
+  curr.workers.forEach(w=>{
+    if(w.owned!==myId) return;
+    const po=prevOwners[w.id];
+    if(po===myId) return;        // already mine, no change
+    if(po===undefined) return;   // brand new worker in this tick
+    if(!po)  playSound('capture', 0.85);  // was free → I grabbed it
+    else     playSound('steal',   1.0);   // was someone else's → I stole it
+  });
+}
+
+socket.on('joined', d=>{
+  myId=d.myId; myColor=d.color; status='playing';
+  initAudio();
+});
+socket.on('queued', d=>{
+  queuePos=d.pos; queueTotal=d.total;
+  if(status!=='playing') status='waiting';
+});
+socket.on('promoted', ()=>{ status='playing'; initAudio(); });
+socket.on('youDied', ()=>{
+  playSound('death', 1.0);
+  status='dead'; deathAlpha=1;
+});
+socket.on('roundWin', d=>{
+  if(d.id===myId) playSound('win', 1.0);
+  else            playSound('delivery', 0.6);   // consolation ding for others
+  winFlash={ color:d.color, slot:d.slot, t:200 };
+});
+socket.on('state', d=>{
+  checkSoundEvents(gs, d);
+  prevGs=gs; gs=d;
+});
+socket.on('playerGone', ()=>{});
+
+// ── INPUT ─────────────────────────────────────────────────────
+const keys={};
+window.addEventListener('keydown', e=>{
+  keys[e.key]=true;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+  initAudio();
+  sendInput();
+});
+window.addEventListener('keyup', e=>{ keys[e.key]=false; sendInput(); });
+c.addEventListener('click', initAudio);
+
+function sendInput(){
+  if(status!=='playing') return;
+  socket.emit('input',{
+    u:!!(keys['w']||keys['ArrowUp']),
+    d:!!(keys['s']||keys['ArrowDown']),
+    l:!!(keys['a']||keys['ArrowLeft']),
+    r:!!(keys['d']||keys['ArrowRight']),
+  });
+}
+
+// ── DRAW HELPERS ─────────────────────────────────────────────
+function glow(col,b){ ctx.strokeStyle=col; ctx.fillStyle=col; ctx.shadowColor=col; ctx.shadowBlur=b??16; }
+
+function drawBg(){
+  ctx.fillStyle=C.bg; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle='#0e1020'; ctx.lineWidth=1; ctx.shadowBlur=0;
+  for(let x=0;x<W;x+=60){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=0;y<H;y+=60){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  ctx.strokeStyle='#0b0b1a';
+  for(let y=2;y<H;y+=5){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  glow('#334466',6); ctx.lineWidth=1.5;
+  [[22,22,1,1],[W-22,22,-1,1],[22,H-22,1,-1],[W-22,H-22,-1,-1]].forEach(([cx,cy,dx,dy])=>{
+    ctx.beginPath();ctx.moveTo(cx+dx*35,cy);ctx.lineTo(cx,cy);ctx.lineTo(cx,cy+dy*35);ctx.stroke();
+  });
+}
+
+function drawGear(g){
+  const gc=g.r>60?C.gear1:C.gear2;
+  ctx.lineWidth=2; glow(gc,18);
+  ctx.beginPath();ctx.arc(g.x,g.y,g.r*.38,0,Math.PI*2);ctx.stroke();
+  ctx.beginPath();ctx.arc(g.x,g.y,g.r*.15,0,Math.PI*2);ctx.stroke();
+  ctx.lineWidth=1.5;
+  for(let i=0;i<g.n;i++){
+    const a1=g.a+i/g.n*Math.PI*2, a2=g.a+(i+.42)/g.n*Math.PI*2;
+    const a3=g.a+(i+.58)/g.n*Math.PI*2, ma=(a2+a3)/2, th=13;
+    ctx.beginPath();
+    ctx.arc(g.x,g.y,g.r,a1,a2);
+    ctx.lineTo(g.x+Math.cos(ma)*(g.r+th),g.y+Math.sin(ma)*(g.r+th));
+    ctx.arc(g.x,g.y,g.r,a3,g.a+(i+1)/g.n*Math.PI*2);
+    ctx.stroke();
+  }
+  ctx.lineWidth=1;ctx.beginPath();ctx.arc(g.x,g.y,g.r,0,Math.PI*2);ctx.stroke();
+}
+
+function drawMachine(p){
+  const {mx,my,color,score}=p, isMe=p.id===myId;
+  for(let i=0;i<5;i++){
+    ctx.globalAlpha=(1-i/5)*0.28;
+    glow(color,14+(isMe?14:0)); ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.arc(mx,my,38+i*20,0,Math.PI*2);ctx.stroke();
+  }
+  ctx.globalAlpha=1;
+  glow(color,22+(isMe?14:0));ctx.lineWidth=isMe?3:2;
+  ctx.strokeRect(mx-26,my-10,52,42);
+  ctx.strokeRect(mx-17,my-28,34,18);
+  ctx.strokeRect(mx-6,my-36,12,8);
+  const sh=Math.min(score/10,1)*42;
+  ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=12;
+  ctx.fillRect(mx-24,my-8+42-sh,48,sh);
+  ctx.globalAlpha=1;
+}
+
+function drawWorker(w){
+  let col=C.worker;
+  if(w.owned){ const op=gs.players.find(p=>p.id===w.owned); if(op) col=op.color; }
+  const flash=w.scd>0 && Math.floor(Date.now()/100)%2===0;
+  const dc=flash?'#ffffff':col;
+  const walk=Math.sin(w.x*.1+Date.now()*.003)*4;
+  glow(dc,w.owned?22:7); ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.arc(w.x,w.y-14,5,0,Math.PI*2);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(w.x,w.y-9);ctx.lineTo(w.x,w.y+4);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(w.x-7,w.y-3+walk);ctx.lineTo(w.x,w.y-1);ctx.lineTo(w.x+7,w.y-3-walk);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(w.x,w.y+4);ctx.lineTo(w.x-5,w.y+14+walk);ctx.moveTo(w.x,w.y+4);ctx.lineTo(w.x+5,w.y+14-walk);ctx.stroke();
+}
+
+function drawRobot(p){
+  const {x,y,color,id}=p, isMe=id===myId;
+  const g=isMe?28:16;
+  glow(color,g);ctx.lineWidth=isMe?3:2;
+  ctx.strokeRect(x-13,y-8,26,22);
+  ctx.beginPath();ctx.arc(x,y-19,11,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle='#00ff44';ctx.shadowColor='#00ff44';ctx.shadowBlur=12+(isMe?16:6);
+  ctx.beginPath();ctx.arc(x-4,y-20,isMe?4:2.5,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(x+4,y-20,isMe?4:2.5,0,Math.PI*2);ctx.fill();
+  glow(color,g);ctx.lineWidth=isMe?2.5:1.5;
+  ctx.beginPath();ctx.moveTo(x-6,y+14);ctx.lineTo(x-8,y+26);ctx.moveTo(x+6,y+14);ctx.lineTo(x+8,y+26);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x-13,y+2);ctx.lineTo(x-25,y+10);ctx.moveTo(x+13,y+2);ctx.lineTo(x+25,y+10);ctx.stroke();
+  if(isMe){
+    ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=14;
+    ctx.font='bold 12px monospace';ctx.textAlign='center';
+    ctx.fillText('YOU',x,y-36);
+  }
+}
+
+function drawHUD(){
+  const ps=[...gs.players].sort((a,b)=>b.score-a.score);
+  ps.forEach((p,i)=>{
+    const isMe=p.id===myId;
+    ctx.fillStyle=p.color;ctx.shadowColor=p.color;ctx.shadowBlur=isMe?18:6;
+    ctx.font=`${isMe?'bold ':''}13px monospace`;ctx.textAlign='left';
+    ctx.fillText(`${isMe?'▶ ':'  '}${isMe?'YOU':'P'+(p.slot+1)}  ${p.score}`, 24, 60+i*20);
+  });
+  if(gs.queueLen>0){
+    ctx.fillStyle='#445566';ctx.shadowBlur=0;
+    ctx.font='11px monospace';ctx.textAlign='right';
+    ctx.fillText(`${gs.queueLen} waiting`, W-18, H-10);
+  }
+  ctx.shadowBlur=0;
+  ctx.fillStyle='#2a3050';ctx.font='11px monospace';ctx.textAlign='center';
+  ctx.fillText('WASD / ARROWS  —  CAPTURE  —  STEAL RIVALS\'  —  DELIVER  —  AVOID GEARS  —  FIRST TO 10', W/2, H-10);
+}
+
+function drawTitle(){
+  ctx.fillStyle='rgba(0,0,0,.65)';ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+
+  ctx.fillStyle=C.red;ctx.shadowColor=C.red;ctx.shadowBlur=28;
+  ctx.font='bold 50px monospace';
+  ctx.fillText('NERD REICH', W/2, H/2-100);
+
+  glow(C.gold, 26);
+  ctx.font='bold 88px monospace';ctx.fillStyle=C.gold;
+  ctx.fillText('METROPOLIS', W/2, H/2-18);
+
+  ctx.fillStyle='#aabbcc';ctx.shadowColor='#aabbcc';ctx.shadowBlur=8;
+  ctx.font='17px monospace';
+  ctx.fillText('UP TO 8 PLAYERS  ·  WASD OR ARROW KEYS', W/2, H/2+46);
+
+  ctx.fillStyle='#556677';ctx.font='13px monospace';ctx.shadowBlur=0;
+  ctx.fillText('CAPTURE WORKERS  ·  STEAL RIVALS\'  ·  ESCORT TO MACHINE  ·  AVOID GEARS  ·  FIRST TO 10', W/2, H/2+76);
+
+  if(Math.floor(localTick/28)%2===0){
+    glow(C.gold,16);
+    ctx.font='bold 17px monospace';ctx.fillStyle=C.gold;
+    ctx.fillText('SHARE THIS URL  —  PLAYERS JOIN AUTOMATICALLY', W/2, H/2+114);
+  }
+
+  // credit
+  ctx.fillStyle='#334455';ctx.shadowBlur=0;ctx.font='11px monospace';
+  ctx.fillText('Created by Sewer Pipe Sound  ·  2026', W/2, H-14);
+}
+
+function drawWaiting(){
+  ctx.fillStyle='rgba(0,0,0,.74)';ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+
+  if(status==='dead' && deathAlpha>0){
+    glow(C.red, 28);
+    ctx.font='bold 62px monospace';
+    ctx.globalAlpha=Math.min(1, deathAlpha);
+    ctx.fillText('YOU HIT A GEAR', W/2, H/2-36);
+    ctx.globalAlpha=1;
+    ctx.fillStyle='#889aaa';ctx.shadowBlur=8;ctx.font='22px monospace';
+    ctx.fillText(`BACK IN LINE  ·  POSITION  ${queuePos}`, W/2, H/2+22);
+  } else {
+    glow(C.gold, 20);
+    ctx.font='bold 42px monospace';ctx.fillStyle=C.gold;
+    ctx.fillText('NERD REICH: METROPOLIS', W/2, H/2-58);
+    ctx.fillStyle='#aabbcc';ctx.shadowColor='#aabbcc';ctx.shadowBlur=10;
+    ctx.font='24px monospace';
+    ctx.fillText(`WAITING  ·  POSITION  ${queuePos}  /  ${queueTotal}`, W/2, H/2+4);
+    ctx.fillStyle='#556677';ctx.shadowBlur=0;ctx.font='14px monospace';
+    ctx.fillText('You will join automatically when a slot opens', W/2, H/2+42);
+  }
+
+  // credit
+  ctx.fillStyle='#334455';ctx.shadowBlur=0;ctx.font='11px monospace';
+  ctx.fillText('Created by Sewer Pipe Sound  ·  2026', W/2, H-14);
+}
+
+function drawWin(){
+  if(!winFlash) return;
+  winFlash.t--;
+  if(winFlash.t<=0){ winFlash=null; return; }
+  const a=Math.min(1, winFlash.t/60);
+  ctx.fillStyle=`rgba(0,0,0,${.75*a})`;ctx.fillRect(0,0,W,H);
+  ctx.globalAlpha=a;
+  ctx.fillStyle=winFlash.color;ctx.shadowColor=winFlash.color;ctx.shadowBlur=40;
+  ctx.font='bold 76px monospace';ctx.textAlign='center';
+  ctx.fillText(`P${winFlash.slot+1} CONTROLS`, W/2, H/2-30);
+  ctx.font='bold 38px monospace';
+  ctx.fillText('THE MACHINE', W/2, H/2+30);
+  ctx.globalAlpha=1;
+}
+
+// ── RENDER LOOP ───────────────────────────────────────────────
+function frame(){
+  localTick++;
+  drawBg();
+  gs.gears.forEach(drawGear);
+  gs.players.forEach(drawMachine);
+  gs.workers.forEach(drawWorker);
+  gs.players.forEach(drawRobot);
+
+  const hasPlayers=gs.players.length>0;
+
+  if(status==='playing') drawHUD();
+
+  if(status==='connecting' || (!hasPlayers && status==='waiting')){
+    drawTitle();
+  } else if(status==='waiting' || status==='dead'){
+    if(hasPlayers) drawHUD();
+    drawWaiting();
+    if(deathAlpha>0) deathAlpha=Math.max(0, deathAlpha-.005);
+  }
+
+  drawWin();
+  ctx.shadowBlur=0;
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
