@@ -151,14 +151,23 @@ function resetRound () {
 }
 
 // ── SOCKET EVENTS ────────────────────────────────────────────
+const lobby = new Set();   // connected but not yet pressed SPACE
+
 io.on('connection', sock => {
   console.log(`+ ${sock.id}`);
+  lobby.add(sock.id);
+  sock.emit('lobby');  // tell client to show title screen first
 
-  if (!addToGame(sock)) {
-    queue.push(sock.id);
-    broadcastQueuePos();
-    sock.emit('queued', { pos: queue.length, total: queue.length });
-  }
+  // player presses SPACE on title screen → join the game
+  sock.on('ready', () => {
+    if (!lobby.has(sock.id)) return;
+    lobby.delete(sock.id);
+    if (!addToGame(sock)) {
+      queue.push(sock.id);
+      broadcastQueuePos();
+      sock.emit('queued', { pos: queue.length, total: queue.length });
+    }
+  });
 
   sock.on('input', keys => {
     if (players[sock.id]) players[sock.id].keys = keys;
@@ -166,6 +175,7 @@ io.on('connection', sock => {
 
   sock.on('disconnect', () => {
     console.log(`- ${sock.id}`);
+    lobby.delete(sock.id);
     if (players[sock.id]) {
       removeFromGame(sock.id);
       promoteQueue();
