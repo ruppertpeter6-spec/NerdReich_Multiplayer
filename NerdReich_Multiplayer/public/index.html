@@ -143,7 +143,7 @@ window.addEventListener('keydown',e=>{
   sendInput();
 });
 window.addEventListener('keyup',e=>{ keys[e.key]=false; sendInput(); });
-c.addEventListener('click',initAudio);
+c.addEventListener('click',()=>{ if(status==='lobby') joinGame(); else initAudio(); });
 
 function sendInput(){
   if(status!=='playing'||!socket) return;
@@ -333,7 +333,7 @@ function drawTitle(bv){
   if(Math.floor(localTick/28)%2===0){
     glow(C.gold,16+bv*18);
     ctx.font='bold 17px monospace';ctx.fillStyle=C.gold;
-    ctx.fillText('SHARE THIS URL  \u2014  PLAYERS JOIN AUTOMATICALLY',W/2,H/2+114);
+    ctx.fillText('PRESS SPACE OR CLICK TO JOIN',W/2,H/2+114);
   }
   ctx.fillStyle='#334455';ctx.shadowBlur=0;ctx.font='11px monospace';
   ctx.fillText('Created by Sewer Pipe Sound  \u00b7  2026',W/2,H-14);
