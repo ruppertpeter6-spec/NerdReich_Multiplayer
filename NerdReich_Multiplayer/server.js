@@ -192,17 +192,12 @@ function respawnBot (botId) {
 function botAI (bot) {
   const keys = { u:0, d:0, l:0, r:0 };
 
-  // What's the bot carrying?
   const mine = workers.filter(w => w.owned === bot.id);
-
-  // Pick a movement target
   let tx, ty;
 
   if (mine.length >= 2) {
-    // Carrying workers → head to machine
     tx = bot.mx; ty = bot.my;
   } else {
-    // Find nearest free worker (or steal if close)
     const free = workers.filter(w => !w.owned);
     if (free.length > 0) {
       const nearest = free.reduce((a, b) => dist(bot, a) < dist(bot, b) ? a : b);
@@ -210,39 +205,49 @@ function botAI (bot) {
     } else if (mine.length > 0) {
       tx = bot.mx; ty = bot.my;
     } else {
-      // Wander toward centre
-      tx = W / 2 + (Math.random() - 0.5) * 200;
-      ty = H / 2 + (Math.random() - 0.5) * 100;
-    }
-  }
-
-  // Gear avoidance — highest priority
-  let avoiding = false;
-  for (const g of GEARS) {
-    if (dist(bot, g) < g.r + 90) {
-      // Flee directly away from gear centre
-      const ax = bot.x - g.x;
-      const ay = bot.y - g.y;
-      if (Math.abs(ax) >= Math.abs(ay)) {
-        keys.l = ax < 0 ? 1 : 0;
-        keys.r = ax >= 0 ? 1 : 0;
-      } else {
-        keys.u = ay < 0 ? 1 : 0;
-        keys.d = ay >= 0 ? 1 : 0;
+      // Stable wander target — refresh every 90 ticks
+      if (!bot._wx || tick % 90 === 0) {
+        bot._wx = 140 + Math.random() * (W - 280);
+        bot._wy = 100 + Math.random() * (H - 200);
       }
-      avoiding = true;
-      break;
+      tx = bot._wx; ty = bot._wy;
     }
   }
 
-  if (!avoiding) {
-    const dx = tx - bot.x;
-    const dy = ty - bot.y;
-    keys.l = dx < -18 ? 1 : 0;
-    keys.r = dx > 18  ? 1 : 0;
-    keys.u = dy < -18 ? 1 : 0;
-    keys.d = dy > 18  ? 1 : 0;
+  // Combined repulsion from ALL nearby gears simultaneously.
+  // Quadratic falloff so the force grows steeply near the edge.
+  let repX = 0, repY = 0, danger = 0;
+  for (const g of GEARS) {
+    const d = dist(bot, g);
+    const threshold = g.r + 110;
+    if (d < threshold && d > 1) {
+      const frac = 1 - d / threshold;          // 0 at edge, 1 at centre
+      const str  = frac * frac * 5;
+      repX += (bot.x - g.x) / d * str;
+      repY += (bot.y - g.y) / d * str;
+      danger = Math.max(danger, frac);
+    }
   }
+
+  let moveX, moveY;
+  if (danger > 0) {
+    // Blend: strong repulsion + weakening pull toward target so bot steers
+    // around rather than bouncing straight back.
+    const tdx = tx - bot.x, tdy = ty - bot.y;
+    const td  = Math.hypot(tdx, tdy) || 1;
+    const pull = (1 - danger) * 0.7;
+    moveX = repX + tdx / td * pull;
+    moveY = repY + tdy / td * pull;
+  } else {
+    moveX = tx - bot.x;
+    moveY = ty - bot.y;
+  }
+
+  // Both axes set independently → diagonal movement possible
+  keys.l = moveX < -12 ? 1 : 0;
+  keys.r = moveX > 12  ? 1 : 0;
+  keys.u = moveY < -12 ? 1 : 0;
+  keys.d = moveY > 12  ? 1 : 0;
 
   bot.keys = keys;
 }
