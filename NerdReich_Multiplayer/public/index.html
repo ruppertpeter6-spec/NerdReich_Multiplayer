@@ -133,6 +133,23 @@ function joinGame(){
   initAudio();
   setupSocket();
 }
+function joinSolo(){
+  if(status!=='lobby') return;
+  status='connecting';
+  initAudio();
+  socket=io();
+  socket.on('connect',  ()=>socket.emit('solo'));
+  socket.on('lobby',    ()=>{});
+  socket.on('joined',   d=>{ myId=d.myId; status='playing'; });
+  socket.on('queued',   d=>{ queuePos=d.pos; queueTotal=d.total; status='waiting'; });
+  socket.on('promoted', ()=>{ status='playing'; });
+  socket.on('youDied',  ()=>{ playSound('death',1.0); status='dead'; deathAlpha=1; });
+  socket.on('roundWin', d=>{
+    if(d.id===myId) playSound('win',1.0); else playSound('delivery',0.5);
+    winFlash={color:d.color,slot:d.slot,t:200};
+  });
+  socket.on('state',    d=>{ checkSoundEvents(gs,d); gs=d; });
+}
 
 // \u2500\u2500 INPUT \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 const keys={};
@@ -140,6 +157,7 @@ window.addEventListener('keydown',e=>{
   keys[e.key]=true;
   if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
   if(e.key===' ') joinGame();
+  if(e.key==='b'||e.key==='B') joinSolo();
   sendInput();
 });
 window.addEventListener('keyup',e=>{ keys[e.key]=false; sendInput(); });
@@ -295,6 +313,10 @@ function drawRobot(p, bv){
     ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=14;
     ctx.font='bold 12px monospace';ctx.textAlign='center';
     ctx.fillText('YOU',x,y-36);
+  } else if(p.isBot){
+    ctx.fillStyle='#556677';ctx.shadowColor='#556677';ctx.shadowBlur=6;
+    ctx.font='10px monospace';ctx.textAlign='center';
+    ctx.fillText('BOT',x,y-36);
   }
 }
 
@@ -304,7 +326,8 @@ function drawHUD(bv){
     const isMe=p.id===myId;
     ctx.fillStyle=p.color;ctx.shadowColor=p.color;ctx.shadowBlur=isMe?18:6;
     ctx.font=`${isMe?'bold ':''}13px monospace`;ctx.textAlign='left';
-    ctx.fillText(`${isMe?'\u25b6 ':'  '}${isMe?'YOU':'P'+(p.slot+1)}  ${p.score}`, 24, 60+i*20);
+    const label=isMe?'YOU':p.isBot?'BOT':'P'+(p.slot+1);
+    ctx.fillText(`${isMe?'\u25b6 ':'  '}${label}  ${p.score}`, 24, 60+i*20);
   });
   if(gs.queueLen>0){
     ctx.fillStyle='#445566';ctx.shadowBlur=0;
@@ -330,10 +353,15 @@ function drawTitle(bv){
   ctx.fillText('UP TO 8 PLAYERS  \u00b7  WASD OR ARROW KEYS',W/2,H/2+46);
   ctx.fillStyle='#556677';ctx.font='13px monospace';ctx.shadowBlur=0;
   ctx.fillText(`CAPTURE WORKERS · STEAL RIVALS' · ESCORT TO MACHINE · AVOID GEARS · FIRST TO 10`,W/2,H/2+76);
-  if(Math.floor(localTick/28)%2===0){
+  const blink=Math.floor(localTick/28)%2===0;
+  if(blink){
     glow(C.gold,16+bv*18);
     ctx.font='bold 17px monospace';ctx.fillStyle=C.gold;
-    ctx.fillText('PRESS SPACE OR CLICK TO JOIN',W/2,H/2+114);
+    ctx.fillText('SPACE / CLICK  —  MULTIPLAYER',W/2,H/2+112);
+  } else {
+    glow(C.p2,16+bv*18);
+    ctx.font='bold 17px monospace';ctx.fillStyle=C.p2;
+    ctx.fillText('B  —  1 PLAYER VS 3 BOTS',W/2,H/2+112);
   }
   ctx.fillStyle='#334455';ctx.shadowBlur=0;ctx.font='11px monospace';
   ctx.fillText('Created by Sewer Pipe Sound  \u00b7  2026',W/2,H-14);
