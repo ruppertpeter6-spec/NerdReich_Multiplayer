@@ -30,19 +30,17 @@ const COLORS = [
   '#aaddff', // 7 ice-blue
 ];
 
-// Machine (delivery target) position per slot
 const MPOS = [
-  { mx:55,    my:190    }, // 0 top-left
-  { mx:W-55,  my:190    }, // 1 top-right
-  { mx:55,    my:H-190  }, // 2 bot-left
-  { mx:W-55,  my:H-190  }, // 3 bot-right
-  { mx:55,    my:H/2    }, // 4 mid-left
-  { mx:W-55,  my:H/2    }, // 5 mid-right
-  { mx:W/2,   my:48     }, // 6 top-center
-  { mx:W/2,   my:H-48   }, // 7 bot-center
+  { mx:55,    my:190    },
+  { mx:W-55,  my:190    },
+  { mx:55,    my:H-190  },
+  { mx:W-55,  my:H-190  },
+  { mx:55,    my:H/2    },
+  { mx:W-55,  my:H/2    },
+  { mx:W/2,   my:48     },
+  { mx:W/2,   my:H-48   },
 ];
 
-// Starting position per slot (away from machines, toward centre)
 const SPOS = [
   { x:220,   y:220    },
   { x:W-220, y:220    },
@@ -63,11 +61,15 @@ const GEARS = [
 ];
 
 // ── GAME STATE ───────────────────────────────────────────────
-let players = {};          // socketId → player object
-let queue   = [];          // [socketId, …]  waiting line
+let players = {};
+let queue   = [];
 let workers = [];
-let slots   = new Array(MAX).fill(null);  // slot index → socketId | null
+let slots   = new Array(MAX).fill(null);
 let tick    = 0;
+
+// ── BOT STATE ────────────────────────────────────────────────
+const bots        = new Set();          // bot IDs
+const soloSessions = {};                // humanId → [botId, ...]
 
 function mkWorker () {
   return {
@@ -76,8 +78,8 @@ function mkWorker () {
     y:     160  + Math.random() * (H - 320),
     vx:    (Math.random() - .5) * .6,
     vy:    (Math.random() - .5) * .6,
-    owned: null,   // socketId or null
-    scd:   0,      // steal-cooldown frames
+    owned: null,
+    scd:   0,
     t:     Math.random() * 99,
   };
 }
@@ -130,10 +132,7 @@ function promoteQueue () {
   while (queue.length > 0 && freeSlot() >= 0) {
     const nid   = queue.shift();
     const nsock = io.sockets.sockets.get(nid);
-    if (nsock) {
-      addToGame(nsock);
-      nsock.emit('promoted');
-    }
+    if (nsock) { addToGame(nsock); nsock.emit('promoted'); }
   }
   broadcastQueuePos();
 }
@@ -150,15 +149,113 @@ function resetRound () {
   for (let i = 0; i < 10; i++) workers.push(mkWorker());
 }
 
+// ── BOT HELPERS ──────────────────────────────────────────────
+function addBot (slot) {
+  const id = `bot_${slot}_${Math.random().toString(36).slice(2)}`;
+  bots.add(id);
+  slots[slot] = id;
+  players[id] = {
+    id, slot,
+    x:     SPOS[slot].x,
+    y:     SPOS[slot].y,
+    vx: 0, vy: 0,
+    color: COLORS[slot],
+    mx:    MPOS[slot].mx,
+    my:    MPOS[slot].my,
+    score: 0,
+    keys:  { u:0, d:0, l:0, r:0 },
+    isBot: true,
+    wanderTarget: null,
+    wanderTimer: 0,
+  };
+  return id;
+}
+
+function removeBot (botId) {
+  bots.delete(botId);
+  const p = players[botId];
+  if (!p) return;
+  slots[p.slot] = null;
+  workers.forEach(w => { if (w.owned === botId) { w.owned = null; w.scd = 0; } });
+  delete players[botId];
+}
+
+function respawnBot (botId) {
+  const p = players[botId];
+  if (!p) return;
+  workers.forEach(w => { if (w.owned === botId) { w.owned = null; w.scd = 0; } });
+  p.x  = SPOS[p.slot].x;
+  p.y  = SPOS[p.slot].y;
+  p.vx = 0; p.vy = 0;
+}
+
+function botAI (bot) {
+  const keys = { u:0, d:0, l:0, r:0 };
+
+  // What's the bot carrying?
+  const mine = workers.filter(w => w.owned === bot.id);
+
+  // Pick a movement target
+  let tx, ty;
+
+  if (mine.length >= 2) {
+    // Carrying workers → head to machine
+    tx = bot.mx; ty = bot.my;
+  } else {
+    // Find nearest free worker (or steal if close)
+    const free = workers.filter(w => !w.owned);
+    if (free.length > 0) {
+      const nearest = free.reduce((a, b) => dist(bot, a) < dist(bot, b) ? a : b);
+      tx = nearest.x; ty = nearest.y;
+    } else if (mine.length > 0) {
+      tx = bot.mx; ty = bot.my;
+    } else {
+      // Wander toward centre
+      tx = W / 2 + (Math.random() - 0.5) * 200;
+      ty = H / 2 + (Math.random() - 0.5) * 100;
+    }
+  }
+
+  // Gear avoidance — highest priority
+  let avoiding = false;
+  for (const g of GEARS) {
+    if (dist(bot, g) < g.r + 90) {
+      // Flee directly away from gear centre
+      const ax = bot.x - g.x;
+      const ay = bot.y - g.y;
+      if (Math.abs(ax) >= Math.abs(ay)) {
+        keys.l = ax < 0 ? 1 : 0;
+        keys.r = ax >= 0 ? 1 : 0;
+      } else {
+        keys.u = ay < 0 ? 1 : 0;
+        keys.d = ay >= 0 ? 1 : 0;
+      }
+      avoiding = true;
+      break;
+    }
+  }
+
+  if (!avoiding) {
+    const dx = tx - bot.x;
+    const dy = ty - bot.y;
+    keys.l = dx < -18 ? 1 : 0;
+    keys.r = dx > 18  ? 1 : 0;
+    keys.u = dy < -18 ? 1 : 0;
+    keys.d = dy > 18  ? 1 : 0;
+  }
+
+  bot.keys = keys;
+}
+
 // ── SOCKET EVENTS ────────────────────────────────────────────
-const lobby = new Set();   // connected but not yet pressed SPACE
+const lobby = new Set();
 
 io.on('connection', sock => {
   console.log(`+ ${sock.id}`);
   lobby.add(sock.id);
-  sock.emit('lobby');  // tell client to show title screen first
+  sock.emit('lobby');
 
-  // player presses SPACE on title screen → join the game
+  // Multiplayer join
   sock.on('ready', () => {
     if (!lobby.has(sock.id)) return;
     lobby.delete(sock.id);
@@ -169,6 +266,20 @@ io.on('connection', sock => {
     }
   });
 
+  // Solo vs bots join
+  sock.on('solo', () => {
+    if (!lobby.has(sock.id)) return;
+    lobby.delete(sock.id);
+    addToGame(sock);
+    // Add 3 bots in next free slots
+    const botIds = [];
+    for (let i = 0; i < 3; i++) {
+      const s = freeSlot();
+      if (s >= 0) botIds.push(addBot(s));
+    }
+    soloSessions[sock.id] = botIds;
+  });
+
   sock.on('input', keys => {
     if (players[sock.id]) players[sock.id].keys = keys;
   });
@@ -176,6 +287,11 @@ io.on('connection', sock => {
   sock.on('disconnect', () => {
     console.log(`- ${sock.id}`);
     lobby.delete(sock.id);
+    // Clean up solo bots if this was a solo session
+    if (soloSessions[sock.id]) {
+      soloSessions[sock.id].forEach(removeBot);
+      delete soloSessions[sock.id];
+    }
     if (players[sock.id]) {
       removeFromGame(sock.id);
       promoteQueue();
@@ -191,61 +307,65 @@ setInterval(() => {
   tick++;
   GEARS.forEach(g => g.a += g.spd);
 
-  // trickle-spawn workers
   if (tick % 90 === 0 && workers.length < 14) workers.push(mkWorker());
 
-  // ── player movement + capture + steal ──
+  // Run bot AI
+  bots.forEach(id => { if (players[id]) botAI(players[id]); });
+
+  // Player movement + capture + steal
   const toKill = [];
   Object.values(players).forEach(p => {
     const spd = 4.5;
     p.vx = p.keys.l ? -spd : p.keys.r ? spd : p.vx * .72;
     p.vy = p.keys.u ? -spd : p.keys.d ? spd : p.vy * .72;
-    p.x  = Math.max(28,   Math.min(W - 28,  p.x + p.vx));
-    p.y  = Math.max(70,   Math.min(H - 45,  p.y + p.vy));
+    p.x  = Math.max(28,  Math.min(W - 28, p.x + p.vx));
+    p.y  = Math.max(70,  Math.min(H - 45, p.y + p.vy));
 
-    // gear death
     for (const g of GEARS) {
       if (dist(p, g) < g.r + 22) { toKill.push(p.id); break; }
     }
 
-    // capture free workers
     workers.forEach(w => {
       if (!w.owned && dist(p, w) < 38) {
         w.owned = p.id; w.scd = 0;
       } else if (w.owned && w.owned !== p.id && w.scd === 0 && dist(p, w) < 42) {
-        // steal escorted worker
         w.owned = p.id; w.scd = 28;
       }
     });
   });
 
-  // ── process deaths ──
-  toKill.forEach(id => {
-    const sock = io.sockets.sockets.get(id);
-    if (sock) sock.emit('youDied');
-    removeFromGame(id);
-    if (!queue.includes(id)) queue.push(id);   // back of the line
-    promoteQueue();
+  // Process deaths
+  const killed = new Set(toKill);
+  killed.forEach(id => {
+    if (bots.has(id)) {
+      // Bots respawn in place — no queue
+      respawnBot(id);
+    } else {
+      const sock = io.sockets.sockets.get(id);
+      if (sock) sock.emit('youDied');
+      removeFromGame(id);
+      if (!queue.includes(id)) queue.push(id);
+      promoteQueue();
+    }
   });
 
-  // ── worker movement + delivery ──
+  // Worker movement + delivery
   const dead = new Set();
   workers.forEach((w, wi) => {
-    w.t  += .15;
+    w.t += .15;
     if (w.scd > 0) w.scd--;
 
     if (w.owned) {
       const p = players[w.owned];
       if (!p) { w.owned = null; return; }
 
-      const grp = workers.filter(x => x.owned === w.owned);
-      const fi  = grp.indexOf(w);
+      const grp  = workers.filter(x => x.owned === w.owned);
+      const fi   = grp.indexOf(w);
       const dirX = p.mx < W / 2 ? 1 : -1;
 
       w.x += (p.x + dirX * (fi + 1) * 18 - w.x) * .11;
       w.y += (p.y + (fi % 3 - 1)  * 20  - w.y) * .11;
 
-      // delivery
       if (Math.hypot(w.x - p.mx, w.y - p.my) < 65) {
         p.score++;
         dead.add(wi);
@@ -255,17 +375,15 @@ setInterval(() => {
         }
       }
     } else {
-      // free wander
       w.vx += (Math.random() - .5) * .07;
       w.vy += (Math.random() - .5) * .07;
       w.vx  = Math.max(-.9, Math.min(.9, w.vx));
       w.vy  = Math.max(-.9, Math.min(.9, w.vy));
-      w.x  += w.vx;  w.y += w.vy;
+      w.x  += w.vx; w.y += w.vy;
       w.x   = Math.max(155, Math.min(W - 155, w.x));
       w.y   = Math.max(110, Math.min(H - 75,  w.y));
     }
 
-    // gear scatter
     GEARS.forEach(g => {
       if (dist(w, g) < g.r + 18) {
         w.owned = null; w.scd = 0;
@@ -279,11 +397,11 @@ setInterval(() => {
   });
   workers = workers.filter((_, i) => !dead.has(i));
 
-  // ── broadcast ──
   io.emit('state', {
     players: Object.values(players).map(p => ({
       id: p.id, slot: p.slot, x: p.x, y: p.y,
       color: p.color, score: p.score, mx: p.mx, my: p.my,
+      isBot: p.isBot || false,
     })),
     workers: workers.map(w => ({
       id: w.id, x: w.x, y: w.y, owned: w.owned, scd: w.scd,
