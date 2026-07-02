@@ -214,40 +214,37 @@ function botAI (bot) {
     }
   }
 
-  // Combined repulsion from ALL nearby gears simultaneously.
-  // Quadratic falloff so the force grows steeply near the edge.
+  // Target direction as unit vector
+  const tdx = tx - bot.x, tdy = ty - bot.y;
+  const td  = Math.hypot(tdx, tdy) || 1;
+
+  // Combined repulsion from all nearby gears (quadratic falloff)
   let repX = 0, repY = 0, danger = 0;
   for (const g of GEARS) {
     const d = dist(bot, g);
     const threshold = g.r + 110;
     if (d < threshold && d > 1) {
-      const frac = 1 - d / threshold;          // 0 at edge, 1 at centre
-      const str  = frac * frac * 5;
-      repX += (bot.x - g.x) / d * str;
-      repY += (bot.y - g.y) / d * str;
+      const frac = 1 - d / threshold;
+      repX += (bot.x - g.x) / d * frac * frac;
+      repY += (bot.y - g.y) / d * frac * frac;
       danger = Math.max(danger, frac);
     }
   }
 
-  let moveX, moveY;
-  if (danger > 0) {
-    // Blend: strong repulsion + weakening pull toward target so bot steers
-    // around rather than bouncing straight back.
-    const tdx = tx - bot.x, tdy = ty - bot.y;
-    const td  = Math.hypot(tdx, tdy) || 1;
-    const pull = (1 - danger) * 0.7;
-    moveX = repX + tdx / td * pull;
-    moveY = repY + tdy / td * pull;
-  } else {
-    moveX = tx - bot.x;
-    moveY = ty - bot.y;
-  }
+  // Blend: repulsion scaled by danger, target always present
+  const moveX = repX * danger * 3 + (tdx / td) * (1 - danger * 0.5);
+  const moveY = repY * danger * 3 + (tdy / td) * (1 - danger * 0.5);
 
-  // Both axes set independently → diagonal movement possible
-  keys.l = moveX < -12 ? 1 : 0;
-  keys.r = moveX > 12  ? 1 : 0;
-  keys.u = moveY < -12 ? 1 : 0;
-  keys.d = moveY > 12  ? 1 : 0;
+  // Normalize so threshold is consistent regardless of magnitude
+  const mLen = Math.hypot(moveX, moveY);
+  if (mLen > 0.01) {
+    const nx = moveX / mLen;
+    const ny = moveY / mLen;
+    keys.l = nx < -0.3 ? 1 : 0;
+    keys.r = nx > 0.3  ? 1 : 0;
+    keys.u = ny < -0.3 ? 1 : 0;
+    keys.d = ny > 0.3  ? 1 : 0;
+  }
 
   bot.keys = keys;
 }
