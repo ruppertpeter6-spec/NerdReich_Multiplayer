@@ -318,7 +318,7 @@ setInterval(() => {
   const toKill = [];
   Object.values(players).forEach(p => {
     const carried = workers.filter(w => w.owned === p.id).length;
-    const spd = 4.5 * Math.max(0.2, 1 - carried * 0.10);
+    const spd = 4.5 * Math.max(0.3, 1 - carried * 0.02);
     p.vx = p.keys.l ? -spd : p.keys.r ? spd : p.vx * .72;
     p.vy = p.keys.u ? -spd : p.keys.d ? spd : p.vy * .72;
     p.x  = Math.max(28,  Math.min(W - 28, p.x + p.vx));
